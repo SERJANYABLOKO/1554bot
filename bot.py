@@ -1,28 +1,18 @@
-import asyncio
 import sqlite3
-import logging
+import time
+import threading
 from datetime import datetime
 
 import requests
 from bs4 import BeautifulSoup
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import Message
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ===== НАСТРОЙКИ =====
-TOKEN = "ТВОЙ_ТОКЕН_ОТ_BOTFATHER"  # Замени на свой токен
-SCHOOL_URL = "https://sch1554.mskobr.ru/#news"  # Ссылка на раздел с новостями
-CHAT_ID = -1001234567890  # ID твоего классного чата (можно временно твой ID)
+TOKEN = "ТВОЙ_ТОКЕН"  # Замени на свой токен от BotFather
+CHAT_ID = -1001234567890  # ID твоего чата (можно пока свой ID)
+SCHOOL_URL = "https://sch1554.mskobr.ru/#news"
 # =====================
-
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
-
-# Инициализация бота
-bot = Bot(token=TOKEN)
-dp = Dispatcher()
-scheduler = AsyncIOScheduler()
 
 # Инициализация базы данных
 def init_db():
@@ -41,59 +31,34 @@ def init_db():
 
 # Функция парсинга новостей
 def parse_news():
-    """Парсит новости с сайта школы"""
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
+        headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(SCHOOL_URL, headers=headers, timeout=10)
         response.encoding = 'utf-8'
         
         if response.status_code != 200:
-            logging.error(f"Ошибка загрузки сайта: {response.status_code}")
             return []
         
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # ПРИМЕР: ищем новости (теги нужно подобрать под реальный сайт)
-        # Это примерная структура — нужно заменить на реальные теги сайта 1554
         news_items = []
         
-        # Ищем блоки новостей (замени на реальные классы с сайта)
-        for item in soup.find_all('div', class_='news-item')[:5]:  # 5 последних новостей
+        # Пример поиска (замени на реальные теги сайта 1554)
+        for item in soup.find_all('div', class_='news-item')[:5]:
             title_tag = item.find('a', class_='news-title')
             if title_tag:
                 title = title_tag.get_text(strip=True)
                 link = title_tag.get('href', '')
-                if not link.startswith('http'):
+                if link and not link.startswith('http'):
                     link = 'https://sch1554.mskobr.ru' + link
-                news_items.append({
-                    'title': title,
-                    'link': link
-                })
-        
-        # Если ничего не нашли по первой логике — попробуй другие селекторы
-        if not news_items:
-            # Альтернативный поиск (пример)
-            for item in soup.find_all('div', class_='news'):
-                title_elem = item.find('h3')
-                if title_elem:
-                    title = title_elem.get_text(strip=True)
-                    link_elem = item.find('a')
-                    link = link_elem.get('href', '') if link_elem else ''
-                    if link and not link.startswith('http'):
-                        link = 'https://sch1554.mskobr.ru' + link
-                    news_items.append({'title': title, 'link': link})
+                news_items.append({'title': title, 'link': link})
         
         return news_items
-        
     except Exception as e:
-        logging.error(f"Ошибка при парсинге: {e}")
+        print(f"Ошибка парсинга: {e}")
         return []
 
-# Функция проверки новых новостей
+# Проверка новых новостей
 def check_new_news():
-    """Проверяет, есть ли новые новости"""
     news_list = parse_news()
     if not news_list:
         return []
@@ -103,99 +68,76 @@ def check_new_news():
     
     new_news = []
     for news in news_list:
-        # Проверяем, не отправляли ли уже такую новость
         cursor.execute('SELECT * FROM sent_news WHERE news_title = ?', (news['title'],))
         if not cursor.fetchone():
             new_news.append(news)
-            # Сохраняем в БД
-            cursor.execute('''
-                INSERT INTO sent_news (news_title, news_link, sent_date)
-                VALUES (?, ?, ?)
-            ''', (news['title'], news['link'], datetime.now().isoformat()))
+            cursor.execute('INSERT INTO sent_news (news_title, news_link, sent_date) VALUES (?, ?, ?)',
+                         (news['title'], news['link'], datetime.now().isoformat()))
     
     conn.commit()
     conn.close()
     return new_news
 
-# Асинхронная отправка новостей в Telegram
-async def send_news_to_telegram():
-    """Отправляет новые новости в чат"""
+# Отправка новостей в Telegram
+async def send_news(context: ContextTypes.DEFAULT_TYPE):
     new_news = check_new_news()
     if new_news:
         for news in new_news:
-            message = f"📢 **Новая новость школы!**\n\n"
-            message += f"**{news['title']}**\n"
-            message += f"[Читать подробнее]({news['link']})"
-            
-            try:
-                await bot.send_message(
-                    chat_id=CHAT_ID,
-                    text=message,
-                    parse_mode="Markdown",
-                    disable_web_page_preview=False
-                )
-                logging.info(f"Отправлена новость: {news['title']}")
-            except Exception as e:
-                logging.error(f"Ошибка отправки: {e}")
-        
-        # Отправляем сводку в лог
-        await bot.send_message(
-            chat_id=CHAT_ID,
-            text=f"✅ Бот проверил новости в {datetime.now().strftime('%H:%M')}\nНайдено новых: {len(new_news)}"
-        )
-    else:
-        logging.info("Новых новостей нет")
+            message = f"📢 **Новая новость школы!**\n\n**{news['title']}**\n[Читать]({news['link']})"
+            await context.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='Markdown')
 
-# ===== КОМАНДЫ БОТА =====
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    await message.answer(
-        "🤖 **Бот-помощник школы 1554**\n\n"
-        "Я автоматически отслеживаю новости на сайте школы "
-        "и присылаю их в этот чат.\n\n"
-        "**Доступные команды:**\n"
+# Команды бота
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 Бот-помощник школы 1554\n"
+        "Доступные команды:\n"
         "/start - Показать это сообщение\n"
-        "/last - Показать последнюю новость\n"
-        "/check - Принудительно проверить новости сейчас"
+        "/last - Последняя новость\n"
+        "/check - Проверить новости сейчас"
     )
 
-@dp.message(Command("last"))
-async def cmd_last(message: Message):
+async def last(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('news.db')
     cursor = conn.cursor()
     cursor.execute('SELECT news_title, news_link FROM sent_news ORDER BY id DESC LIMIT 1')
-    last = cursor.fetchone()
+    last_news = cursor.fetchone()
     conn.close()
     
-    if last:
-        await message.answer(
-            f"📰 **Последняя новость:**\n\n{last[0]}\n\n[Ссылка]({last[1]})",
-            parse_mode="Markdown"
-        )
+    if last_news:
+        await update.message.reply_text(f"📰 **Последняя новость:**\n\n{last_news[0]}\n[Ссылка]({last_news[1]})", parse_mode='Markdown')
     else:
-        await message.answer("Новостей ещё не было. Попробуй /check")
+        await update.message.reply_text("Новостей пока нет. Попробуй /check")
 
-@dp.message(Command("check"))
-async def cmd_check(message: Message):
-    await message.answer("🔍 Проверяю новости...")
-    await send_news_to_telegram()
-    await message.answer("✅ Проверка завершена")
+async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔍 Проверяю новости...")
+    await send_news(context)
+    await update.message.reply_text("✅ Готово!")
 
-# Запуск планировщика и бота
-async def main():
-    # Инициализация БД
+# Функция для фоновой проверки (без планировщика)
+def background_checker(app: Application):
+    while True:
+        time.sleep(1800)  # 30 минут
+        import asyncio
+        asyncio.run(send_news(app.context))
+
+def main():
     init_db()
     
-    # Запускаем планировщик (каждые 30 минут)
-    scheduler.add_job(send_news_to_telegram, "interval", minutes=30)
-    scheduler.start()
+    # Создаём приложение
+    app = Application.builder().token(TOKEN).build()
     
-    # Первая проверка при запуске
-    await send_news_to_telegram()
+    # Добавляем команды
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("last", last))
+    app.add_handler(CommandHandler("check", check))
     
-    # Запуск бота
-    logging.info("Бот запущен!")
-    await dp.start_polling(bot)
+    # Запускаем фоновую проверку в отдельном потоке
+    thread = threading.Thread(target=background_checker, args=(app,), daemon=True)
+    thread.start()
+    
+    # Запускаем бота
+    print("Бот запущен!")
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
